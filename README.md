@@ -39,6 +39,49 @@ pi -e npm:@gotgenes/pi-anthropic-auth
 2. Select a Claude Pro/Max model and start chatting. The extension handles compatibility transparently.
 3. API-key behavior is unaffected; the extension's changes apply only to OAuth sessions.
 
+## Account Rotation (Multiple Claude Accounts)
+
+If you have more than one Claude Pro/Max subscription, the extension can pool them and automatically fail over when one hits its usage limit.
+The request that hit the limit is retried on the next account, so the failover is transparent.
+
+Rotation is **opt-in**: with an empty pool the feature is a complete passthrough and nothing changes.
+
+### Enabling it
+
+Accounts are added by snapshotting Pi's own login result, so there is no separate login flow to learn:
+
+```text
+/login anthropic                        # log in as your first account
+/anthropic-auth:accounts add work
+/login anthropic                        # log in as your second account
+/anthropic-auth:accounts add personal
+```
+
+### Managing the pool
+
+```text
+/anthropic-auth:accounts list           # show pooled accounts (never prints tokens)
+/anthropic-auth:accounts switch work    # manually change the active account
+/anthropic-auth:accounts remove work    # drop an account
+```
+
+The pool lives in `~/.pi/agent/anthropic-accounts.json` (mode `0600`), alongside Pi's own `auth.json`.
+Pooled access tokens are refreshed automatically as they expire.
+
+### What triggers a rotation
+
+Only **account-scoped** quota failures rotate — HTTP 429 / `rate_limit_error` / "usage limit reached".
+Deliberately excluded:
+
+1. `529 overloaded_error` — an Anthropic-wide capacity signal, identical on every account.
+2. The "out of extra usage" 400 — actually a request-shaping symptom, not a quota problem.
+3. `401` / `invalid_grant` — the credential is bad; run `/login anthropic` again for that account.
+
+After one full cycle through the pool without success, the original Anthropic error is surfaced rather than retried further.
+Rotation is also skipped once a response has begun streaming content, so a retry can never duplicate partial output.
+
+Note: each account bills separately and caches separately, so a failover pays a cold prompt cache once.
+
 ## Troubleshooting
 
 ### Verify the extension is loaded
@@ -50,6 +93,8 @@ pi-anthropic-auth diagnostics
   version: 0.6.5
   module:  /root/.pi/agent/.../src/index.ts
   built-in Anthropic transport: resolved
+  account rotation pool: 2 account(s), active: work
+  pool file: /root/.pi/agent/anthropic-accounts.json
 ```
 
 The `module` line shows which copy of the extension loaded.
@@ -104,6 +149,18 @@ Modes:
 
 - `PI_ANTHROPIC_AUTH_DEBUG=all` — log all Anthropic OAuth shaping events
 - `PI_ANTHROPIC_AUTH_DEBUG=tool-use` — log only requests that include `tool_use`
+
+### Testing Account Rotation
+
+Waiting for a real usage limit is impractical, so rotation has a forced-failure switch:
+
+```bash
+PI_ANTHROPIC_AUTH_FORCE_ROTATE=1 \
+PI_ANTHROPIC_AUTH_DEBUG=all \
+pi --model anthropic/claude-haiku-4-5 --no-session -p "hello"
+```
+
+`=1` treats the first attempt as usage-limited (so you should still get a normal answer, served by the second account); a larger number fails that many attempts, and a number at or above the pool size exercises the exhausted-pool path.
 
 Example:
 

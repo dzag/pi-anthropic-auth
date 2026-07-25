@@ -94,7 +94,7 @@ export function createAccountsCommandHandler(
     const subcommand = words.at(0) ?? "list";
     const target = words.slice(1).join(" ");
 
-    const report = (message: string, isError = false): void => {
+    const report: Reporter = (message, isError = false) => {
       if (ctx.hasUI) {
         ctx.ui.notify(message, isError ? "error" : "info");
       } else if (isError) {
@@ -104,80 +104,121 @@ export function createAccountsCommandHandler(
       }
     };
 
-    switch (subcommand) {
-      case "list":
-        report(formatPool(store.read(), store.filePath));
-        return;
-
-      case "add": {
-        if (!target) {
-          report("Usage: /anthropic-auth:accounts add <label>", true);
-          return;
-        }
-        const credential = readCredential("anthropic");
-        if (credential?.type !== "oauth") {
-          report(
-            "No Anthropic OAuth credential is stored. Run `/login anthropic` first, then re-run this command.",
-            true,
-          );
-          return;
-        }
-        if (
-          typeof credential.access !== "string" ||
-          typeof credential.refresh !== "string" ||
-          typeof credential.expires !== "number"
-        ) {
-          report(
-            "The stored Anthropic credential is missing OAuth token fields; cannot pool it.",
-            true,
-          );
-          return;
-        }
-        await store.add({
-          label: target,
-          access: credential.access,
-          refresh: credential.refresh,
-          expires: credential.expires,
-        });
-        report(
-          `Pooled the current Anthropic credential as "${target}".\n${formatPool(store.read(), store.filePath)}`,
-        );
-        return;
-      }
-
-      case "switch": {
-        if (!target) {
-          report("Usage: /anthropic-auth:accounts switch <label>", true);
-          return;
-        }
-        const pool = await store.switchTo(target);
-        if (activeAccountOf(pool)?.label !== target) {
-          report(`No pooled account labelled "${target}".`, true);
-          return;
-        }
-        report(`Active Anthropic account is now "${target}".`);
-        return;
-      }
-
-      case "remove": {
-        if (!target) {
-          report("Usage: /anthropic-auth:accounts remove <label>", true);
-          return;
-        }
-        const before = store.size();
-        await store.remove(target);
-        if (store.size() === before) {
-          report(`No pooled account labelled "${target}".`, true);
-          return;
-        }
-        report(
-          `Removed "${target}".\n${formatPool(store.read(), store.filePath)}`,
-        );
-        return;
-      }
-
-      default:
-        report(USAGE, true);
+    if (subcommand === "list") {
+      report(formatPool(store.read(), store.filePath));
+      return;
     }
+
+    // A Map rather than an object literal so the lookup is honestly typed as
+    // possibly-missing (this repo does not enable `noUncheckedIndexedAccess`).
+    const subcommands = new Map<
+      string,
+      (input: SubcommandInput) => Promise<void>
+    >([
+      ["add", addAccount],
+      ["switch", switchAccount],
+      ["remove", removeAccount],
+    ]);
+
+    const run = subcommands.get(subcommand);
+    if (!run) {
+      report(USAGE, true);
+      return;
+    }
+    if (!target) {
+      report(`Usage: /anthropic-auth:accounts ${subcommand} <label>`, true);
+      return;
+    }
+
+    await run({ store, readCredential, target, report });
   };
+}
+
+/** Emits a message to the user, as an error when `isError` is set. */
+type Reporter = (message: string, isError?: boolean) => void;
+
+/** Everything a subcommand needs; `target` is guaranteed non-empty. */
+interface SubcommandInput {
+  store: AccountStore;
+  readCredential: CredentialReader;
+  target: string;
+  report: Reporter;
+}
+
+/**
+ * Extracts OAuth token fields from a stored credential.
+ *
+ * @returns the token triple, or `undefined` when the credential is absent, not
+ *   an OAuth credential, or missing required fields.
+ */
+function readOAuthTokens(
+  credential: StoredCredential | undefined,
+): { access: string; refresh: string; expires: number } | undefined {
+  if (credential?.type !== "oauth") return undefined;
+  const { access, refresh, expires } = credential;
+  if (
+    typeof access !== "string" ||
+    typeof refresh !== "string" ||
+    typeof expires !== "number"
+  ) {
+    return undefined;
+  }
+  return { access, refresh, expires };
+}
+
+async function addAccount({
+  store,
+  readCredential,
+  target,
+  report,
+}: SubcommandInput): Promise<void> {
+  const credential = readCredential("anthropic");
+  if (credential?.type !== "oauth") {
+    report(
+      "No Anthropic OAuth credential is stored. Run `/login anthropic` first, then re-run this command.",
+      true,
+    );
+    return;
+  }
+
+  const tokens = readOAuthTokens(credential);
+  if (!tokens) {
+    report(
+      "The stored Anthropic credential is missing OAuth token fields; cannot pool it.",
+      true,
+    );
+    return;
+  }
+
+  await store.add({ label: target, ...tokens });
+  report(
+    `Pooled the current Anthropic credential as "${target}".\n${formatPool(store.read(), store.filePath)}`,
+  );
+}
+
+async function switchAccount({
+  store,
+  target,
+  report,
+}: SubcommandInput): Promise<void> {
+  const pool = await store.switchTo(target);
+  if (activeAccountOf(pool)?.label !== target) {
+    report(`No pooled account labelled "${target}".`, true);
+    return;
+  }
+  report(`Active Anthropic account is now "${target}".`);
+}
+
+async function removeAccount({
+  store,
+  target,
+  report,
+}: SubcommandInput): Promise<void> {
+  const before = store.size();
+  await store.remove(target);
+  if (store.size() === before) {
+    report(`No pooled account labelled "${target}".`, true);
+    return;
+  }
+  report(`Removed "${target}".\n${formatPool(store.read(), store.filePath)}`);
 }

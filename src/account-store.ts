@@ -235,6 +235,9 @@ export class AccountStore {
    * @returns the newly active account, or `undefined` when the pool has fewer
    *   than two accounts (nothing to rotate to).
    */
+  // Called by `createRotatingStreamSimple` through a destructured dependency,
+  // which fallow's class-member analysis does not follow.
+  // fallow-ignore-next-line unused-class-member
   rotateNext(now: number = Date.now()): Promise<PooledAccount | undefined> {
     let rotated = false;
     return this.modify((pool) => {
@@ -249,6 +252,9 @@ export class AccountStore {
   }
 
   /** Replaces the stored tokens for `label` (used after a token refresh). */
+  // Called by `createRotatingStreamSimple` through a destructured dependency,
+  // which fallow's class-member analysis does not follow.
+  // fallow-ignore-next-line unused-class-member
   updateTokens(
     label: string,
     tokens: Pick<PooledAccount, "access" | "refresh" | "expires">,

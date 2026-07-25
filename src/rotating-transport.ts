@@ -24,6 +24,17 @@ export type StreamSimpleLike = (
   options?: SimpleStreamOptions,
 ) => AssistantMessageEventStream;
 
+/**
+ * Result of a single delegate attempt.
+ *
+ * `usage-limited` is the only outcome that may rotate; `completed` includes an
+ * attempt that ended in a non-rotatable error already forwarded to the caller.
+ */
+type AttemptOutcome =
+  | { kind: "completed" }
+  | { kind: "usage-limited"; limitEvent: AssistantMessageEvent }
+  | { kind: "failed"; message: string };
+
 /** Injectable collaborators, so the transport is testable without I/O. */
 export interface RotatingTransportDeps {
   /** The wrapped transport — in production, the OAuth-shaping wrapper. */
@@ -128,53 +139,23 @@ export function createRotatingStreamSimple(
         const account = await resolveActiveAccount();
         if (!account) break;
 
-        const attemptOptions: SimpleStreamOptions = {
-          ...options,
-          apiKey: account.access,
-        };
+        const outcome = await runAttempt(out, attempt, account.access);
 
-        let forwardedContent = false;
-        let limitEvent: AssistantMessageEvent | undefined;
-
-        try {
-          if (forceLimitOnAttempt?.(attempt)) {
-            limitEvent = syntheticLimitEvent(model);
-          } else {
-            for await (const event of delegate(
-              model,
-              context,
-              attemptOptions,
-            )) {
-              if (
-                !forwardedContent &&
-                event.type === "error" &&
-                isAccountUsageLimitError(errorMessageOf(event))
-              ) {
-                limitEvent = event;
-                break;
-              }
-              if (isContentEvent(event)) forwardedContent = true;
-              out.push(event);
-            }
-          }
-        } catch (error) {
-          // The built-in transport reports failures as events, but a wrapper or
-          // future host could throw; treat that as a non-rotatable failure.
-          out.push(errorEvent(model, formatError(error)));
+        if (outcome.kind === "completed") {
+          out.end();
+          return;
+        }
+        if (outcome.kind === "failed") {
+          out.push(errorEvent(model, outcome.message));
           out.end();
           return;
         }
 
-        if (!limitEvent) {
-          out.end();
-          return;
-        }
-
-        firstLimitEvent ??= limitEvent;
+        firstLimitEvent ??= outcome.limitEvent;
         debugLog("rotation.usage-limit", {
           attempt,
           account: account.label,
-          message: errorMessageOf(limitEvent),
+          message: errorMessageOf(outcome.limitEvent),
         });
 
         const next = await store.rotateNext(now());
@@ -190,6 +171,47 @@ export function createRotatingStreamSimple(
           ),
       );
       out.end();
+    }
+
+    /**
+     * Runs one attempt against `apiKey`, forwarding its events to `out`.
+     *
+     * Stops forwarding and reports `usage-limited` only while nothing has been
+     * forwarded yet; once any content event is out the door a retry could
+     * duplicate output, so the limit error is forwarded like any other event and
+     * the attempt is reported as `completed`.
+     */
+    async function runAttempt(
+      out: AssistantMessageEventStream,
+      attempt: number,
+      apiKey: string,
+    ): Promise<AttemptOutcome> {
+      if (forceLimitOnAttempt?.(attempt)) {
+        return { kind: "usage-limited", limitEvent: syntheticLimitEvent(model) };
+      }
+
+      let forwardedContent = false;
+      try {
+        for await (const event of delegate(model, context, {
+          ...options,
+          apiKey,
+        })) {
+          if (
+            !forwardedContent &&
+            event.type === "error" &&
+            isAccountUsageLimitError(errorMessageOf(event))
+          ) {
+            return { kind: "usage-limited", limitEvent: event };
+          }
+          if (isContentEvent(event)) forwardedContent = true;
+          out.push(event);
+        }
+      } catch (error) {
+        // The built-in transport reports failures as events, but a wrapper or
+        // future host could throw; treat that as a non-rotatable failure.
+        return { kind: "failed", message: formatError(error) };
+      }
+      return { kind: "completed" };
     }
 
     /**

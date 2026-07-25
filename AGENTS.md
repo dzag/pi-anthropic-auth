@@ -37,6 +37,7 @@ The current implementation does the following:
 3. Prepends an Anthropic billing/content-consistency header block to `system[]`
 4. Sanitizes Pi's default preamble by anchor during the same shaping pass — removing the Pi identity, custom-tool filler, and Pi documentation paragraphs and replacing only the identity with a minimal neutral prompt — while preserving tool snippets, guidelines, and appended extension content
 5. Gates all shaping on the `sk-ant-oat` OAuth access-token prefix, so API-key and non-Anthropic requests pass through untouched
+6. Optionally pools multiple Anthropic OAuth accounts and fails over to the next one when a request hits an account-scoped usage limit, retrying transparently (opt-in; a complete passthrough when the pool is empty)
 
 It wraps, but does not reimplement, Pi's built-in Anthropic streaming transport.
 The wrapper delegates to Pi's own built-in Anthropic `streamSimple` transport and only injects an `onPayload` shaping step.
@@ -90,13 +91,18 @@ Important upstream behavior confirmed from `~/development/pi/pi`:
 
 Current source layout:
 
-1. `src/index.ts`: extension registration (transport wrapper + `/anthropic-auth:status` command)
+1. `src/index.ts`: extension registration (transport wrappers + `/anthropic-auth:status` and `/anthropic-auth:accounts` commands)
 2. `src/host-transport.ts`: runtime resolution of Pi's built-in Anthropic transport via an `@earendil-works/pi-ai/compat` import through Pi's loader indirection, preferring the `anthropicMessagesApi()` factory over the deprecated `streamSimpleAnthropic` alias (Issue #28, Issue #31, Issue #35)
 3. `src/oauth-transport.ts`: token-gated `streamSimple` wrapper that applies shaping on every Anthropic call path
 4. `src/request-shaping.ts`: Anthropic OAuth request shaping helpers
 5. `src/system-prompt-shaping.ts`: anchor-driven Anthropic OAuth prompt sanitizer that replaces Pi's identity paragraph and preserves tool snippets, guidelines, and appended content
 6. `src/debug.ts`: opt-in structured debug logging for live OAuth repros
 7. `src/diagnostics.ts`: `ExtensionDiagnostics` value object, formatter, and handler factory for the `/anthropic-auth:status` command
+8. `src/account-store.ts`: atomic, write-serialized account pool file (`$PI_AGENT_DIR/anthropic-accounts.json`), degrading to an empty pool when missing or corrupt
+9. `src/token-refresh.ts`: local Anthropic OAuth refresh for *pooled* accounts (Pi only refreshes the one credential in `auth.json`)
+10. `src/limit-detection.ts`: classifies an Anthropic failure as `usage-limit` / `auth` / `other`
+11. `src/rotating-transport.ts`: per-request `apiKey` substitution from the pool plus retry-on-usage-limit failover
+12. `src/accounts-command.ts`: `/anthropic-auth:accounts list|add|switch|remove` handler
 
 ### Project Skills
 
@@ -418,6 +424,33 @@ It prefers the non-deprecated `anthropicMessagesApi().streamSimple` factory and 
 The earlier `import.meta.resolve("@earendil-works/pi-ai")` plus subpath-file import bypassed that indirection — jiti consults its alias map on the import path but not the `resolve` path — so it fell through to the extension's own directory and failed under `pi install` / the Bun binary (Issue #31).
 The #35 seam concern is resolved in practice on pi >=0.80.8 (the loader aliases `/compat` in both modes and pi ships this delegation pattern as an official example); the residual watch is the eventual `compat` removal, when `anthropicMessagesApi()` relocates off the compat entrypoint.
 
+### Account Rotation Layering And Constraints
+
+The rotation wrapper sits *outside* the shaping wrapper: `rotating(shaping(builtin))`.
+Each retry therefore re-runs shaping against the token that attempt actually uses, and the shaping wrapper stays single-purpose.
+
+Rotation never writes Pi's `auth.json`.
+The coding-agent package exports only `readStoredCredential`; the writable `AuthStorage` is not public, and reimplementing its `proper-lockfile` semantics would be a compat liability.
+Instead the transport overrides `options.apiKey` per request from a self-owned pool file, and `/anthropic-auth:accounts add` snapshots whatever `/login anthropic` last stored.
+That also keeps the extension clear of the `oauth` registration override that broke on pi 0.80.8 (Issue #43).
+
+Two behaviors are load-bearing and covered by tests:
+
+1. Retry only happens when **no** content event has been forwarded yet.
+   An HTTP 429 fails inside `client.messages.create(...)` *before* the built-in transport pushes `start`, so limit failures reliably arrive with nothing forwarded — but a mid-stream failure must never be retried or output would duplicate.
+2. Retry is capped at one attempt per pooled account, after which the original Anthropic error is forwarded.
+
+### Synthesized Error Events Need A Full `AssistantMessage`
+
+When emitting an `{ type: "error" }` event ourselves, the `error` payload must be a *complete* `AssistantMessage` (`role`, `content`, `api`, `provider`, `model`, `usage`, `stopReason`, `timestamp`), mirroring the initial `output` object in pi-ai's `anthropic-messages` transport.
+Pi's consumers read `content` and `usage` off it unconditionally: a bare `{ errorMessage }` crashes the caller with "Cannot read properties of undefined (reading 'filter')".
+The unit suite did not catch this — only the live CLI repro did.
+
+### Tests Must Not Read The Real `~/.pi/agent`
+
+`test/setup/isolate-agent-dir.ts` (wired via `vitest.config.ts`) redirects `PI_AGENT_DIR` at a temp directory for the whole suite.
+Without it, anything constructing an `AccountStore` with its default path — including `src/index.ts` in the registration tests — reads the developer's real account pool, which silently flips the rotating transport out of passthrough and produces a false failure.
+
 ### `registerProvider` Merges, It Does Not Replace
 
 Pi's `ModelRuntime.registerProvider` (0.80.8+) overlays each registration's *defined* values on the previous one and preserves keys left `undefined`.
@@ -426,6 +459,8 @@ A stale installed copy that registers `oauth` keeps it in the merged config even
 The merge is an intentional upstream contract (the `ModelRuntime.registerProvider` source states it "merges defined values over the previous registration and preserves undefined ones, matching the legacy ModelRegistry contract"), so it will not be "fixed" upstream.
 As partial hardening, `src/index.ts` calls `pi.unregisterProvider("anthropic")` before re-registering, restoring the built-in provider first so a stale merged `oauth` is cleared — but during the initial load phase the loader only drops *pending* registrations, so this only helps when the stale copy loaded *before* ours; running a single up-to-date copy remains the actual fix.
 When a local `-e`/`"../"` copy and an installed `packages[]` copy both load, isolate to one copy before validating a registration change.
+The symptom is confusing rather than loud: the *stale* copy's wrapper serves requests, so features it already had (shaping, debug logs) keep working while anything added in the local copy silently never runs.
+Check `packages[]` in both `~/.pi/agent/settings.json` and `.pi/settings.json`, and prefer `pi install .` plus `pi remove npm:<pkg>` so exactly one copy is registered.
 A breaking release ships as a major bump, so a stale installed copy pinned `^oldmajor` is not upgraded by `pi update` (it stays within the caret range); cross the major with `pi install npm:<pkg>@latest`, which rewrites the pin (Issue #43 shipped as `2.0.0`; a stale `^1.0.0` install kept clobbering refresh with the removed-API `oauth` override until re-installed).
 
 ### Model ID Alias Drift
