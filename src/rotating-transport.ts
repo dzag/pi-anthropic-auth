@@ -98,8 +98,17 @@ export function createRotatingStreamSimple(
   } = deps;
 
   return (model, context, options) => {
+    const isOAuth = isAnthropicOAuthToken(options?.apiKey);
+    const poolSize = store.size();
+    debugLog("rotation.gate", {
+      isOAuth,
+      poolSize,
+      forcedRotationEnabled: forceLimitOnAttempt !== undefined,
+      poolFile: store.filePath,
+    });
+
     // Passthrough: not OAuth, or rotation not configured.
-    if (!isAnthropicOAuthToken(options?.apiKey) || store.size() === 0) {
+    if (!isOAuth || poolSize === 0) {
       return delegate(model, context, options);
     }
 
@@ -129,7 +138,7 @@ export function createRotatingStreamSimple(
 
         try {
           if (forceLimitOnAttempt?.(attempt)) {
-            limitEvent = syntheticLimitEvent();
+            limitEvent = syntheticLimitEvent(model);
           } else {
             for await (const event of delegate(
               model,
@@ -151,7 +160,7 @@ export function createRotatingStreamSimple(
         } catch (error) {
           // The built-in transport reports failures as events, but a wrapper or
           // future host could throw; treat that as a non-rotatable failure.
-          out.push(errorEvent(formatError(error)));
+          out.push(errorEvent(model, formatError(error)));
           out.end();
           return;
         }
@@ -173,7 +182,13 @@ export function createRotatingStreamSimple(
       }
 
       // Pool exhausted (or nothing to rotate to): surface the real failure.
-      out.push(firstLimitEvent ?? errorEvent("All Anthropic accounts in the rotation pool are usage-limited."));
+      out.push(
+        firstLimitEvent ??
+          errorEvent(
+            model,
+            "All Anthropic accounts in the rotation pool are usage-limited.",
+          ),
+      );
       out.end();
     }
 
@@ -204,16 +219,43 @@ export function createRotatingStreamSimple(
   };
 }
 
-function errorEvent(message: string): AssistantMessageEvent {
-  return {
-    type: "error",
-    reason: "error",
-    error: { errorMessage: message },
-  } as unknown as AssistantMessageEvent;
+/**
+ * Builds a well-formed `error` event for a failure we synthesize ourselves.
+ *
+ * The `error` payload must be a *complete* `AssistantMessage`, not just an
+ * `errorMessage`: Pi's consumers read `content`, `usage`, and the model fields
+ * off it unconditionally (a bare `{ errorMessage }` crashes the caller with
+ * "Cannot read properties of undefined (reading 'filter')").  The field set
+ * mirrors the initial `output` object the built-in Anthropic transport creates.
+ */
+function errorEvent(
+  model: Model<Api>,
+  message: string,
+): AssistantMessageEvent {
+  const error: AssistantMessage = {
+    role: "assistant",
+    content: [],
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "error",
+    errorMessage: message,
+    timestamp: Date.now(),
+  };
+  return { type: "error", reason: "error", error };
 }
 
-function syntheticLimitEvent(): AssistantMessageEvent {
+function syntheticLimitEvent(model: Model<Api>): AssistantMessageEvent {
   return errorEvent(
+    model,
     'PI_ANTHROPIC_AUTH_FORCE_ROTATE: simulated 429 {"type":"error","error":{"type":"rate_limit_error"}}',
   );
 }

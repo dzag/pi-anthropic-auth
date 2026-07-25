@@ -284,6 +284,40 @@ test("does not rotate with a single pooled account", async () => {
   assert.equal(events[0]?.type, "error");
 });
 
+// Regression guard: a bare `{ errorMessage }` error payload crashed the live
+// caller with "Cannot read properties of undefined (reading 'filter')", because
+// Pi reads `content`/`usage` off the AssistantMessage unconditionally.
+test("synthesized error events carry a well-formed AssistantMessage", async () => {
+  const store = createStore();
+  await store.add(account("a"));
+  await store.add(account("b"));
+  const { delegate } = scriptedDelegate([
+    [errorEvent(LIMIT_MESSAGE)],
+    [errorEvent(LIMIT_MESSAGE)],
+  ]);
+  const wrapped = createRotatingStreamSimple({
+    delegate,
+    createStream,
+    store,
+    // Force every attempt to fail so the pool is exhausted and our own
+    // synthesized event is the one forwarded.
+    forceLimitOnAttempt: () => true,
+  });
+
+  const events = await collect(wrapped(MODEL, CONTEXT, { apiKey: OAUTH_TOKEN }));
+
+  assert.equal(events.length, 1);
+  const payload = (events[0] as { error?: Record<string, unknown> }).error;
+  assert.ok(payload);
+  assert.equal(payload.role, "assistant");
+  assert.ok(Array.isArray(payload.content));
+  assert.ok(payload.usage);
+  assert.equal(payload.stopReason, "error");
+  assert.equal(payload.model, "claude-haiku-4-5");
+  assert.equal(typeof payload.timestamp, "number");
+  assert.match(String(payload.errorMessage), /rate_limit_error/);
+});
+
 test("converts a thrown delegate failure into a single error event", async () => {
   const store = createStore();
   await store.add(account("a"));
