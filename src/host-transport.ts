@@ -1,4 +1,5 @@
 import type {
+  AssistantMessageEventStream,
   SimpleStreamOptions,
   StreamFunction,
 } from "@earendil-works/pi-ai";
@@ -28,6 +29,15 @@ export type PiAiNamespace = Record<string, unknown>;
 
 /** Minimal shape of the `ProviderStreams` that `anthropicMessagesApi()` returns. */
 type AnthropicMessagesApi = () => { streamSimple?: unknown };
+
+/**
+ * Factory for a fresh `AssistantMessageEventStream`.
+ *
+ * The account-rotation transport owns an outer stream so it can re-invoke the
+ * delegate after a usage-limit failure and forward the retry's events to the
+ * original caller (see `src/rotating-transport.ts`).
+ */
+export type EventStreamFactory = () => AssistantMessageEventStream;
 
 /**
  * Reads the built-in Anthropic `streamSimple` transport off a pi-ai namespace.
@@ -94,8 +104,52 @@ export function pickAnthropicStreamSimple(
  * @throws when the namespace exposes no usable Anthropic transport.
  */
 export async function resolveBuiltinAnthropicStreamSimple(): Promise<AnthropicStreamSimpleDelegate> {
-  const namespace = (await import(
-    "@earendil-works/pi-ai/compat"
-  )) as PiAiNamespace;
-  return pickAnthropicStreamSimple(namespace);
+  return pickAnthropicStreamSimple(await importPiAiCompat());
+}
+
+/**
+ * Reads the `AssistantMessageEventStream` factory off a pi-ai namespace.
+ *
+ * Prefers the documented `createAssistantMessageEventStream` factory (the
+ * export explicitly annotated "for use in extensions" upstream) and falls back
+ * to constructing the exported class directly.
+ *
+ * @param namespace - the imported pi-ai module namespace.
+ * @returns a factory producing fresh assistant-message event streams.
+ * @throws when neither the factory nor the class is available.
+ */
+export function pickEventStreamFactory(
+  namespace: PiAiNamespace,
+): EventStreamFactory {
+  const factory = namespace.createAssistantMessageEventStream;
+  if (typeof factory === "function") {
+    return factory as EventStreamFactory;
+  }
+
+  const streamClass = namespace.AssistantMessageEventStream;
+  if (typeof streamClass === "function") {
+    const Ctor = streamClass as new () => AssistantMessageEventStream;
+    return () => new Ctor();
+  }
+
+  throw new Error(
+    "Could not resolve an AssistantMessageEventStream factory: " +
+      "@earendil-works/pi-ai/compat exported neither " +
+      "`createAssistantMessageEventStream` nor `AssistantMessageEventStream`.",
+  );
+}
+
+/**
+ * Resolves the host's `AssistantMessageEventStream` factory at runtime.
+ *
+ * Goes through the same `@earendil-works/pi-ai/compat` host indirection as the
+ * transport so both resolutions succeed or fail together under either loader
+ * mode (Node `alias`, Bun `virtualModules`).
+ */
+export async function resolveEventStreamFactory(): Promise<EventStreamFactory> {
+  return pickEventStreamFactory(await importPiAiCompat());
+}
+
+function importPiAiCompat(): Promise<PiAiNamespace> {
+  return import("@earendil-works/pi-ai/compat");
 }

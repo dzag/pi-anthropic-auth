@@ -63,6 +63,10 @@ vi.mock("#src/host-transport", () => ({
     // satisfies it structurally (the registry only ever invokes it for
     // `anthropic-messages` models).
     Promise.resolve(streamSimpleAnthropicMock),
+  // The rotating transport needs an outer stream factory; the real one resolves
+  // through the same host `/compat` seam, which this mock stands in for.
+  resolveEventStreamFactory: () =>
+    Promise.resolve(createAssistantMessageEventStream),
 }));
 
 /**

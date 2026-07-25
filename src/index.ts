@@ -1,11 +1,21 @@
 import { fileURLToPath } from "node:url";
+import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { AccountStore, activeAccountOf } from "./account-store";
+import { createAccountsCommandHandler } from "./accounts-command";
 import {
   createStatusCommandHandler,
   type ExtensionDiagnostics,
 } from "./diagnostics";
-import { resolveBuiltinAnthropicStreamSimple } from "./host-transport";
+import {
+  resolveBuiltinAnthropicStreamSimple,
+  resolveEventStreamFactory,
+} from "./host-transport";
 import { createAnthropicOAuthStreamSimple } from "./oauth-transport";
+import {
+  createRotatingStreamSimple,
+  forcedRotationAttempts,
+} from "./rotating-transport";
 
 export default async function (pi: ExtensionAPI): Promise<void> {
   // Re-register the built-in `anthropic` provider with a thin transport
@@ -44,11 +54,28 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     default: { version: string };
   };
   const streamSimpleAnthropic = await resolveBuiltinAnthropicStreamSimple();
+  const createStream = await resolveEventStreamFactory();
+
+  // Multi-account rotation.  The store is a self-owned pool file, not Pi's
+  // `auth.json`: the coding-agent package exports only `readStoredCredential`,
+  // so there is no supported way to *write* a rotated credential back into Pi's
+  // credential store.  Instead the rotating transport overrides `options.apiKey`
+  // per request.  An empty pool (the default) makes the whole layer a
+  // passthrough, so installs that never configure accounts are unaffected.
+  const accountStore = new AccountStore();
 
   const diagnostics: ExtensionDiagnostics = {
     version: pkg.default.version,
     modulePath: fileURLToPath(import.meta.url),
     transportResolved: true,
+    accountPoolPath: accountStore.filePath,
+    describeAccountPool: () => {
+      const pool = accountStore.read();
+      const active = activeAccountOf(pool);
+      return pool.accounts.length === 0
+        ? "empty (rotation disabled)"
+        : `${pool.accounts.length} account(s), active: ${active?.label ?? "unknown"}`;
+    },
   };
 
   // Defensively clear any prior `anthropic` registration before installing our
@@ -66,9 +93,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   // the stale copy loads afterward.  Running a single up-to-date copy remains
   // the actual fix (see the Issue #43 migration guidance).
   pi.unregisterProvider("anthropic");
+  // Layering: rotation wraps *outside* the shaping wrapper, so every retry
+  // re-runs shaping against the account token that attempt actually uses, and
+  // the shaping wrapper stays single-purpose.
   pi.registerProvider("anthropic", {
     api: "anthropic-messages",
-    streamSimple: createAnthropicOAuthStreamSimple(streamSimpleAnthropic),
+    streamSimple: createRotatingStreamSimple({
+      delegate: createAnthropicOAuthStreamSimple(streamSimpleAnthropic),
+      createStream,
+      store: accountStore,
+      forceLimitOnAttempt: forcedRotationAttempts(),
+    }),
   });
 
   // The /anthropic-auth:status command surfaces the loaded version, module
@@ -78,5 +113,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     description:
       "Show pi-anthropic-auth diagnostics: version, loaded module path, and transport status.",
     handler: createStatusCommandHandler(diagnostics),
+  });
+
+  // Account pool management.  `add` snapshots whatever `/login anthropic` last
+  // stored, so Pi's own login flow remains the only login implementation (and
+  // we stay clear of the `oauth` registration override that broke on pi 0.80.8,
+  // Issue #43).
+  pi.registerCommand("anthropic-auth:accounts", {
+    description:
+      "Manage the Anthropic account rotation pool: list | add <label> | switch <label> | remove <label>.",
+    handler: createAccountsCommandHandler(accountStore, (providerId) =>
+      readStoredCredential(providerId),
+    ),
   });
 }

@@ -13,6 +13,15 @@ export interface ExtensionDiagnostics {
    * failure aborts extension load before `registerCommand` runs.
    */
   transportResolved: boolean;
+  /** Absolute path of the account rotation pool file. */
+  accountPoolPath?: string;
+  /**
+   * Lazily rendered one-line summary of the account pool.
+   *
+   * A callback rather than a value so the report always reflects the pool file
+   * as it stands *now* — accounts can be added or rotated after load.
+   */
+  describeAccountPool?: () => string;
 }
 
 /**
@@ -37,12 +46,19 @@ export interface StatusCommandContext {
  */
 export function formatDiagnosticsReport(d: ExtensionDiagnostics): string {
   const transport = d.transportResolved ? "resolved" : "not resolved";
-  return [
+  const lines = [
     "pi-anthropic-auth diagnostics",
     `  version: ${d.version}`,
     `  module:  ${d.modulePath}`,
     `  built-in Anthropic transport: ${transport}`,
-  ].join("\n");
+  ];
+  if (d.describeAccountPool) {
+    lines.push(`  account rotation pool: ${d.describeAccountPool()}`);
+  }
+  if (d.accountPoolPath) {
+    lines.push(`  pool file: ${d.accountPoolPath}`);
+  }
+  return lines.join("\n");
 }
 
 /**
