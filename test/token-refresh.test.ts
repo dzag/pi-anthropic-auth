@@ -4,9 +4,9 @@ import { isExpired, refreshAccessToken } from "#src/token-refresh";
 
 type FetchCall = { url: string; body: unknown };
 
-function stubFetch(
-  respond: () => Response | Promise<Response>,
-): { calls: FetchCall[] } {
+function stubFetch(respond: () => Response | Promise<Response>): {
+  calls: FetchCall[];
+} {
   const calls: FetchCall[] = [];
   const original = globalThis.fetch;
   globalThis.fetch = (input, init) => {
@@ -79,7 +79,9 @@ test("refreshAccessToken throws with context on a non-2xx response", async () =>
 });
 
 test("refreshAccessToken throws on invalid JSON", async () => {
-  stubFetch(() => new Response("<html>gateway timeout</html>", { status: 200 }));
+  stubFetch(
+    () => new Response("<html>gateway timeout</html>", { status: 200 }),
+  );
 
   await assert.rejects(refreshAccessToken("refresh-old"), (error: unknown) => {
     assert.ok(error instanceof Error);

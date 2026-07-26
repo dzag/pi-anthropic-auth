@@ -1,8 +1,14 @@
 import {
   type AccountPool,
-  type AccountStore,
+  AccountStore,
   activeAccountOf,
 } from "./account-store";
+import {
+  describeGitignoreResult,
+  ensureGitIgnored,
+  findRepoRoot,
+} from "./gitignore-guard";
+import { type PoolScope, projectPoolPathFor } from "./pool-location";
 
 /**
  * Minimal shape of a stored Pi credential, as returned by the coding-agent's
@@ -39,10 +45,26 @@ export interface AccountsCommandContext {
 const USAGE = [
   "Usage: /anthropic-auth:accounts <subcommand>",
   "  list                 show pooled accounts (no secrets)",
-  "  add <label>          snapshot the current /login anthropic credential into the pool",
+  "  add <label> [-l]     snapshot the current /login anthropic credential into the pool",
   "  switch <label>       make an account active",
   "  remove <label>       drop an account from the pool",
+  "",
+  "  -l, --local          write to this project's .pi/anthropic-accounts.json",
+  "                       instead of the global pool (a project pool fully",
+  "                       replaces the global one for this project)",
 ].join("\n");
+
+/** Human-readable description of where a pool file came from. */
+function describeScope(scope: PoolScope): string {
+  switch (scope) {
+    case "env":
+      return "env override";
+    case "project":
+      return "project-local (overrides global)";
+    default:
+      return "global";
+  }
+}
 
 /**
  * Renders the pool as a masked, human-readable listing.
@@ -50,11 +72,18 @@ const USAGE = [
  * Never prints token material: only the label, active marker, expiry, and last
  * observed usage-limit time.
  */
-export function formatPool(pool: AccountPool, poolPath: string): string {
+export function formatPool(
+  pool: AccountPool,
+  poolPath: string,
+  scope?: PoolScope,
+): string {
+  const location = scope
+    ? `Pool file: ${poolPath} (${describeScope(scope)})`
+    : `Pool file: ${poolPath}`;
   if (pool.accounts.length === 0) {
     return [
       "No Anthropic accounts pooled — rotation is disabled.",
-      `Pool file: ${poolPath}`,
+      location,
       "",
       "To enable rotation: run `/login anthropic` for each account, then",
       "`/anthropic-auth:accounts add <label>` after each login.",
@@ -73,7 +102,7 @@ export function formatPool(pool: AccountPool, poolPath: string): string {
   return [
     `Anthropic account pool (${pool.accounts.length}), * = active:`,
     ...rows,
-    `Pool file: ${poolPath}`,
+    location,
   ].join("\n");
 }
 
@@ -88,11 +117,16 @@ export function formatPool(pool: AccountPool, poolPath: string): string {
 export function createAccountsCommandHandler(
   store: AccountStore,
   readCredential: CredentialReader,
+  deps: AccountsCommandDeps = {},
 ): (args: string, ctx: AccountsCommandContext) => Promise<void> {
+  const {
+    cwd = () => process.cwd(),
+    createStore = (path) => new AccountStore(path, "project"),
+    ensureIgnored = ensureGitIgnored,
+  } = deps;
+
   return async (args, ctx) => {
-    const words = args.trim().split(/\s+/).filter(Boolean);
-    const subcommand = words.at(0) ?? "list";
-    const target = words.slice(1).join(" ");
+    const { subcommand, target, local } = parseArgs(args);
 
     const report: Reporter = (message, isError = false) => {
       if (ctx.hasUI) {
@@ -105,22 +139,11 @@ export function createAccountsCommandHandler(
     };
 
     if (subcommand === "list") {
-      report(formatPool(store.read(), store.filePath));
+      report(formatPool(store.read(), store.filePath, store.scope));
       return;
     }
 
-    // A Map rather than an object literal so the lookup is honestly typed as
-    // possibly-missing (this repo does not enable `noUncheckedIndexedAccess`).
-    const subcommands = new Map<
-      string,
-      (input: SubcommandInput) => Promise<void>
-    >([
-      ["add", addAccount],
-      ["switch", switchAccount],
-      ["remove", removeAccount],
-    ]);
-
-    const run = subcommands.get(subcommand);
+    const run = SUBCOMMANDS.get(subcommand);
     if (!run) {
       report(USAGE, true);
       return;
@@ -129,9 +152,65 @@ export function createAccountsCommandHandler(
       report(`Usage: /anthropic-auth:accounts ${subcommand} <label>`, true);
       return;
     }
+    if (local && subcommand !== "add") {
+      report(
+        "--local applies only to `add`; other subcommands act on the pool currently in effect.",
+        true,
+      );
+      return;
+    }
 
-    await run({ store, readCredential, target, report });
+    // `add --local` targets this project's pool, creating it if needed; every
+    // other subcommand operates on whichever pool is currently authoritative.
+    const targetStore = local
+      ? createStore(projectPoolPathFor(findRepoRoot(cwd()) ?? cwd()))
+      : store;
+
+    await run({
+      store: targetStore,
+      readCredential,
+      target,
+      report,
+      ensureIgnored: local ? ensureIgnored : undefined,
+    });
   };
+}
+
+const LOCAL_FLAGS = new Set(["-l", "--local"]);
+
+/** Parsed command line: subcommand, label, and whether `--local` was given. */
+function parseArgs(args: string): {
+  subcommand: string;
+  target: string;
+  local: boolean;
+} {
+  const words = args.trim().split(/\s+/).filter(Boolean);
+  return {
+    subcommand: words.at(0) ?? "list",
+    target: words
+      .slice(1)
+      .filter((word) => !LOCAL_FLAGS.has(word))
+      .join(" "),
+    local: words.some((word) => LOCAL_FLAGS.has(word)),
+  };
+}
+
+// A Map rather than an object literal so the lookup is honestly typed as
+// possibly-missing (this repo does not enable `noUncheckedIndexedAccess`).
+const SUBCOMMANDS = new Map<string, (input: SubcommandInput) => Promise<void>>([
+  ["add", addAccount],
+  ["switch", switchAccount],
+  ["remove", removeAccount],
+]);
+
+/** Injectable collaborators, so the command is testable without touching git or cwd. */
+export interface AccountsCommandDeps {
+  /** Working directory used to locate the project root. */
+  cwd?: () => string;
+  /** Builds a store for an explicit path (used by `add --local`). */
+  createStore?: (path: string) => AccountStore;
+  /** Ensures a project-local pool file is git-ignored before secrets land. */
+  ensureIgnored?: typeof ensureGitIgnored;
 }
 
 /** Emits a message to the user, as an error when `isError` is set. */
@@ -143,6 +222,8 @@ interface SubcommandInput {
   readCredential: CredentialReader;
   target: string;
   report: Reporter;
+  /** Set only for `add --local`, where a new project pool may be created. */
+  ensureIgnored?: typeof ensureGitIgnored;
 }
 
 /**
@@ -171,6 +252,7 @@ async function addAccount({
   readCredential,
   target,
   report,
+  ensureIgnored,
 }: SubcommandInput): Promise<void> {
   const credential = readCredential("anthropic");
   if (credential?.type !== "oauth") {
@@ -190,9 +272,20 @@ async function addAccount({
     return;
   }
 
+  // Ignore the pool before writing it, so refresh tokens never exist in a
+  // tracked file even momentarily.
+  const ignoreNote = ensureIgnored
+    ? describeGitignoreResult(ensureIgnored(store.filePath), store.filePath)
+    : undefined;
+
   await store.add({ label: target, ...tokens });
+
   report(
-    `Pooled the current Anthropic credential as "${target}".\n${formatPool(store.read(), store.filePath)}`,
+    [
+      `Pooled the current Anthropic credential as "${target}".`,
+      ...(ignoreNote ? [ignoreNote] : []),
+      formatPool(store.read(), store.filePath, store.scope),
+    ].join("\n"),
   );
 }
 
@@ -220,5 +313,7 @@ async function removeAccount({
     report(`No pooled account labelled "${target}".`, true);
     return;
   }
-  report(`Removed "${target}".\n${formatPool(store.read(), store.filePath)}`);
+  report(
+    `Removed "${target}".\n${formatPool(store.read(), store.filePath, store.scope)}`,
+  );
 }

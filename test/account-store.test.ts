@@ -141,11 +141,7 @@ test("normalizePool drops malformed entries and clamps activeIndex", () => {
   const pool = normalizePool({
     version: 1,
     activeIndex: 17,
-    accounts: [
-      account("good"),
-      { label: "bad", access: "x" },
-      "nonsense",
-    ],
+    accounts: [account("good"), { label: "bad", access: "x" }, "nonsense"],
   });
 
   assert.equal(pool.accounts.length, 1);

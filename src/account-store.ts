@@ -6,8 +6,8 @@ import {
   renameSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
+import { type PoolScope, resolvePoolLocation } from "./pool-location";
 
 /**
  * One pooled Anthropic OAuth account.
@@ -59,18 +59,6 @@ export function emptyPool(): AccountPool {
  */
 export function activeAccountOf(pool: AccountPool): PooledAccount | undefined {
   return pool.accounts.at(pool.activeIndex);
-}
-
-/**
- * Default path of the account pool file.
- *
- * Sits beside Pi's own `auth.json` in the agent directory.  `PI_AGENT_DIR` is
- * honored so a sandboxed or test invocation can redirect it, matching how Pi
- * resolves its own agent directory.
- */
-export function defaultPoolPath(): string {
-  const agentDir = process.env.PI_AGENT_DIR ?? join(homedir(), ".pi", "agent");
-  return join(agentDir, "anthropic-accounts.json");
 }
 
 function isPooledAccount(value: unknown): value is PooledAccount {
@@ -125,15 +113,28 @@ export function normalizePool(parsed: unknown): AccountPool {
  */
 export class AccountStore {
   private readonly path: string;
+  private readonly poolScope: PoolScope;
   private chain: Promise<unknown> = Promise.resolve();
 
-  constructor(path: string = defaultPoolPath()) {
-    this.path = path;
+  constructor(path?: string, scope?: PoolScope) {
+    if (path === undefined) {
+      const location = resolvePoolLocation();
+      this.path = location.path;
+      this.poolScope = location.scope;
+    } else {
+      this.path = path;
+      this.poolScope = scope ?? "global";
+    }
   }
 
   /** Absolute path of the backing pool file. */
   get filePath(): string {
     return this.path;
+  }
+
+  /** Which location this pool came from: env override, project, or global. */
+  get scope(): PoolScope {
+    return this.poolScope;
   }
 
   /** Reads the pool, degrading to an empty pool on any read/parse failure. */

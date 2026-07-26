@@ -65,8 +65,34 @@ Accounts are added by snapshotting Pi's own login result, so there is no separat
 /anthropic-auth:accounts remove work    # drop an account
 ```
 
-The pool lives in `~/.pi/agent/anthropic-accounts.json` (mode `0600`), alongside Pi's own `auth.json`.
 Pooled access tokens are refreshed automatically as they expire.
+
+### Where the pool lives
+
+Exactly one pool file is authoritative per process, resolved in this order:
+
+1. `PI_ANTHROPIC_AUTH_ACCOUNTS_FILE` — an explicit path, for CI and one-off runs.
+2. `.pi/anthropic-accounts.json` in the current project (found by walking up from the working directory).
+3. `~/.pi/agent/anthropic-accounts.json` — the global pool, beside Pi's own `auth.json`.
+
+All pool files are written with mode `0600`.
+
+### Per-project accounts
+
+To use a different set of accounts for one project — work accounts in a work repo, say — add them with `--local`:
+
+```text
+/anthropic-auth:accounts add work-1 --local
+```
+
+That writes `.pi/anthropic-accounts.json` in the project root, which **fully replaces** the global pool for that project (it does not extend it).
+Outside the project, the global pool applies again.
+
+Because the pool contains OAuth **refresh tokens**, the first `--local` write also adds the file to the repository's `.gitignore` and tells you it did.
+If that fails (read-only repo, unusual layout), you get an explicit warning instead of a silent leak.
+
+`--local` applies only to `add`; `list`, `switch`, and `remove` always act on whichever pool is currently in effect.
+Run `/anthropic-auth:accounts list` or `/anthropic-auth:status` to see which one that is.
 
 ### What triggers a rotation
 

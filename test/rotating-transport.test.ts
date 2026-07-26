@@ -37,11 +37,19 @@ function createStream(): AssistantMessageEventStream {
 }
 
 function contentEvent(text: string): AssistantMessageEvent {
-  return { type: "text_start", contentIndex: 0, partial: { text } } as unknown as AssistantMessageEvent;
+  return {
+    type: "text_start",
+    contentIndex: 0,
+    partial: { text },
+  } as unknown as AssistantMessageEvent;
 }
 
 function doneEvent(): AssistantMessageEvent {
-  return { type: "done", reason: "stop", message: {} } as unknown as AssistantMessageEvent;
+  return {
+    type: "done",
+    reason: "stop",
+    message: {},
+  } as unknown as AssistantMessageEvent;
 }
 
 function errorEvent(message: string): AssistantMessageEvent {
@@ -188,7 +196,9 @@ test("rotates and retries on a usage-limit error before any content", async () =
     store,
   });
 
-  const events = await collect(wrapped(MODEL, CONTEXT, { apiKey: OAUTH_TOKEN }));
+  const events = await collect(
+    wrapped(MODEL, CONTEXT, { apiKey: OAUTH_TOKEN }),
+  );
 
   assert.equal(attempts.length, 2);
   assert.equal(attempts[0]?.apiKey, "sk-ant-oat01-a");
@@ -215,7 +225,9 @@ test("does not retry once content has been forwarded", async () => {
     store,
   });
 
-  const events = await collect(wrapped(MODEL, CONTEXT, { apiKey: OAUTH_TOKEN }));
+  const events = await collect(
+    wrapped(MODEL, CONTEXT, { apiKey: OAUTH_TOKEN }),
+  );
 
   assert.equal(attempts.length, 1);
   assert.deepEqual(
@@ -239,7 +251,9 @@ test("forwards the original error after one full cycle through the pool", async 
     store,
   });
 
-  const events = await collect(wrapped(MODEL, CONTEXT, { apiKey: OAUTH_TOKEN }));
+  const events = await collect(
+    wrapped(MODEL, CONTEXT, { apiKey: OAUTH_TOKEN }),
+  );
 
   assert.equal(attempts.length, 2, "one attempt per pooled account, no more");
   assert.deepEqual(
@@ -261,7 +275,9 @@ test("does not rotate on a non-limit error", async () => {
     store,
   });
 
-  const events = await collect(wrapped(MODEL, CONTEXT, { apiKey: OAUTH_TOKEN }));
+  const events = await collect(
+    wrapped(MODEL, CONTEXT, { apiKey: OAUTH_TOKEN }),
+  );
 
   assert.equal(attempts.length, 1);
   assert.equal(events[0]?.type, "error");
@@ -271,14 +287,18 @@ test("does not rotate on a non-limit error", async () => {
 test("does not rotate with a single pooled account", async () => {
   const store = createStore();
   await store.add(account("only"));
-  const { delegate, attempts } = scriptedDelegate([[errorEvent(LIMIT_MESSAGE)]]);
+  const { delegate, attempts } = scriptedDelegate([
+    [errorEvent(LIMIT_MESSAGE)],
+  ]);
   const wrapped = createRotatingStreamSimple({
     delegate,
     createStream,
     store,
   });
 
-  const events = await collect(wrapped(MODEL, CONTEXT, { apiKey: OAUTH_TOKEN }));
+  const events = await collect(
+    wrapped(MODEL, CONTEXT, { apiKey: OAUTH_TOKEN }),
+  );
 
   assert.equal(attempts.length, 1);
   assert.equal(events[0]?.type, "error");
@@ -304,7 +324,9 @@ test("synthesized error events carry a well-formed AssistantMessage", async () =
     forceLimitOnAttempt: () => true,
   });
 
-  const events = await collect(wrapped(MODEL, CONTEXT, { apiKey: OAUTH_TOKEN }));
+  const events = await collect(
+    wrapped(MODEL, CONTEXT, { apiKey: OAUTH_TOKEN }),
+  );
 
   assert.equal(events.length, 1);
   const payload = (events[0] as { error?: Record<string, unknown> }).error;
@@ -330,7 +352,9 @@ test("converts a thrown delegate failure into a single error event", async () =>
     store,
   });
 
-  const events = await collect(wrapped(MODEL, CONTEXT, { apiKey: OAUTH_TOKEN }));
+  const events = await collect(
+    wrapped(MODEL, CONTEXT, { apiKey: OAUTH_TOKEN }),
+  );
 
   assert.equal(events.length, 1);
   assert.equal(events[0]?.type, "error");
@@ -380,7 +404,9 @@ test("the forced-rotation switch drives a real rotation without network calls", 
     forceLimitOnAttempt: forcedRotationAttempts("1"),
   });
 
-  const events = await collect(wrapped(MODEL, CONTEXT, { apiKey: OAUTH_TOKEN }));
+  const events = await collect(
+    wrapped(MODEL, CONTEXT, { apiKey: OAUTH_TOKEN }),
+  );
 
   // Attempt 0 was forced to fail without reaching the delegate.
   assert.equal(attempts.length, 1);

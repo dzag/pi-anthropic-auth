@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
-import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { AccountStore, activeAccountOf } from "./account-store";
 import { createAccountsCommandHandler } from "./accounts-command";
 import {
@@ -62,13 +62,18 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   // credential store.  Instead the rotating transport overrides `options.apiKey`
   // per request.  An empty pool (the default) makes the whole layer a
   // passthrough, so installs that never configure accounts are unaffected.
+  //
+  // Which pool file is authoritative is resolved per process: an explicit
+  // `PI_ANTHROPIC_AUTH_ACCOUNTS_FILE`, else a project-local
+  // `.pi/anthropic-accounts.json`, else the global one.  A project pool fully
+  // replaces the global pool (see `src/pool-location.ts`).
   const accountStore = new AccountStore();
 
   const diagnostics: ExtensionDiagnostics = {
     version: pkg.default.version,
     modulePath: fileURLToPath(import.meta.url),
     transportResolved: true,
-    accountPoolPath: accountStore.filePath,
+    accountPoolPath: `${accountStore.filePath} (${accountStore.scope})`,
     describeAccountPool: () => {
       const pool = accountStore.read();
       const active = activeAccountOf(pool);

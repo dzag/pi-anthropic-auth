@@ -7,7 +7,7 @@ import type {
   Model,
   SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
-import { AccountStore, type PooledAccount } from "./account-store";
+import type { AccountStore, PooledAccount } from "./account-store";
 import { debugLog } from "./debug";
 import type { EventStreamFactory } from "./host-transport";
 import { isAccountUsageLimitError } from "./limit-detection";
@@ -187,7 +187,10 @@ export function createRotatingStreamSimple(
       apiKey: string,
     ): Promise<AttemptOutcome> {
       if (forceLimitOnAttempt?.(attempt)) {
-        return { kind: "usage-limited", limitEvent: syntheticLimitEvent(model) };
+        return {
+          kind: "usage-limited",
+          limitEvent: syntheticLimitEvent(model),
+        };
       }
 
       let forwardedContent = false;
@@ -250,10 +253,7 @@ export function createRotatingStreamSimple(
  * "Cannot read properties of undefined (reading 'filter')").  The field set
  * mirrors the initial `output` object the built-in Anthropic transport creates.
  */
-function errorEvent(
-  model: Model<Api>,
-  message: string,
-): AssistantMessageEvent {
+function errorEvent(model: Model<Api>, message: string): AssistantMessageEvent {
   const error: AssistantMessage = {
     role: "assistant",
     content: [],

@@ -98,11 +98,13 @@ Current source layout:
 5. `src/system-prompt-shaping.ts`: anchor-driven Anthropic OAuth prompt sanitizer that replaces Pi's identity paragraph and preserves tool snippets, guidelines, and appended content
 6. `src/debug.ts`: opt-in structured debug logging for live OAuth repros
 7. `src/diagnostics.ts`: `ExtensionDiagnostics` value object, formatter, and handler factory for the `/anthropic-auth:status` command
-8. `src/account-store.ts`: atomic, write-serialized account pool file (`$PI_AGENT_DIR/anthropic-accounts.json`), degrading to an empty pool when missing or corrupt
+8. `src/account-store.ts`: atomic, write-serialized account pool file, degrading to an empty pool when missing or corrupt
 9. `src/token-refresh.ts`: local Anthropic OAuth refresh for *pooled* accounts (Pi only refreshes the one credential in `auth.json`)
 10. `src/limit-detection.ts`: classifies an Anthropic failure as `usage-limit` / `auth` / `other`
 11. `src/rotating-transport.ts`: per-request `apiKey` substitution from the pool plus retry-on-usage-limit failover
-12. `src/accounts-command.ts`: `/anthropic-auth:accounts list|add|switch|remove` handler
+12. `src/accounts-command.ts`: `/anthropic-auth:accounts list|add|switch|remove` handler (`add` accepts `-l`/`--local`)
+13. `src/pool-location.ts`: resolves the authoritative pool file (env override, then project-local, then global)
+14. `src/gitignore-guard.ts`: keeps a project-local pool out of version control
 
 ### Project Skills
 
@@ -428,6 +430,10 @@ The #35 seam concern is resolved in practice on pi >=0.80.8 (the loader aliases 
 
 The rotation wrapper sits *outside* the shaping wrapper: `rotating(shaping(builtin))`.
 Each retry therefore re-runs shaping against the token that attempt actually uses, and the shaping wrapper stays single-purpose.
+
+The pool file is resolved per process by `src/pool-location.ts`: `PI_ANTHROPIC_AUTH_ACCOUNTS_FILE`, else a project-local `.pi/anthropic-accounts.json` found by walking up from the working directory, else the global `$PI_AGENT_DIR/anthropic-accounts.json`.
+A project-local pool **fully replaces** the global one rather than merging, so the effective account set is always the single resolved path (surfaced by `/anthropic-auth:status` and `accounts list`).
+Because the pool holds refresh tokens, `add --local` git-ignores the file before writing it.
 
 Rotation never writes Pi's `auth.json`.
 The coding-agent package exports only `readStoredCredential`; the writable `AuthStorage` is not public, and reimplementing its `proper-lockfile` semantics would be a compat liability.

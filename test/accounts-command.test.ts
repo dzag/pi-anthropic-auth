@@ -136,6 +136,84 @@ test("remove drops an account and reports unknown labels", async () => {
   assert.match(ctx.messages[1] ?? "", /No pooled account labelled "ghost"/);
 });
 
+test("add --local writes to the project pool and git-ignores it", async () => {
+  const project = mkdtempSync(join(tmpdir(), "pi-accounts-local-"));
+  onTestFinished(() => {
+    rmSync(project, { recursive: true, force: true });
+  });
+  const globalStore = createStore();
+  const ctx = createContext();
+  const ignored: string[] = [];
+
+  const handler = createAccountsCommandHandler(
+    globalStore,
+    () => OAUTH_CREDENTIAL,
+    {
+      cwd: () => project,
+      ensureIgnored: (poolPath) => {
+        ignored.push(poolPath);
+        return {
+          kind: "added",
+          gitignorePath: "/repo/.gitignore",
+          pattern: "p",
+        };
+      },
+    },
+  );
+
+  await handler("add work --local", ctx);
+
+  const localPool = join(project, ".pi", "anthropic-accounts.json");
+  // Written to the project pool, not the global one.
+  assert.equal(globalStore.size(), 0);
+  assert.equal(new AccountStore(localPool).activeAccount()?.label, "work");
+  // The pool was git-ignored before the secret was written.
+  assert.deepEqual(ignored, [localPool]);
+  assert.match(ctx.messages[0] ?? "", /project-local \(overrides global\)/);
+});
+
+test("add -l is accepted as a short flag and not treated as a label", async () => {
+  const project = mkdtempSync(join(tmpdir(), "pi-accounts-local-"));
+  onTestFinished(() => {
+    rmSync(project, { recursive: true, force: true });
+  });
+  const ctx = createContext();
+
+  const handler = createAccountsCommandHandler(
+    createStore(),
+    () => OAUTH_CREDENTIAL,
+    { cwd: () => project, ensureIgnored: () => ({ kind: "not-a-repo" }) },
+  );
+
+  await handler("add work -l", ctx);
+
+  const localPool = join(project, ".pi", "anthropic-accounts.json");
+  assert.equal(new AccountStore(localPool).activeAccount()?.label, "work");
+});
+
+test("--local is rejected on subcommands other than add", async () => {
+  const store = createStore();
+  await store.add(account("a"));
+  const ctx = createContext();
+  const handler = createAccountsCommandHandler(store, () => OAUTH_CREDENTIAL);
+
+  await handler("remove a --local", ctx);
+
+  assert.equal(store.size(), 1, "the account must not be removed");
+  assert.match(ctx.messages[0] ?? "", /--local applies only to `add`/);
+});
+
+test("list reports which pool scope is in effect", async () => {
+  const store = createStore();
+  await store.add(account("a"));
+  const ctx = createContext();
+  const handler = createAccountsCommandHandler(store, () => undefined);
+
+  await handler("list", ctx);
+
+  assert.match(ctx.messages[0] ?? "", /\(global\)/);
+});
+
 test("an unknown subcommand reports usage", async () => {
   const store = createStore();
   const ctx = createContext();

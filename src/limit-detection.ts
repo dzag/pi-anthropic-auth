@@ -61,10 +61,7 @@ const NEVER_ROTATE_SIGNATURES: readonly string[] = [
   "extra usage",
 ];
 
-function containsAny(
-  haystack: string,
-  needles: readonly string[],
-): boolean {
+function containsAny(haystack: string, needles: readonly string[]): boolean {
   return needles.some((needle) => haystack.includes(needle));
 }
 

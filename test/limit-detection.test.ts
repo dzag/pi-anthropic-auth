@@ -53,5 +53,8 @@ test("treats unknown, empty, and missing messages as other", () => {
 });
 
 test("does not confuse a 429 inside an unrelated number with a status code", () => {
-  assert.equal(classifyAnthropicError("request id req_1042900 failed"), "other");
+  assert.equal(
+    classifyAnthropicError("request id req_1042900 failed"),
+    "other",
+  );
 });
